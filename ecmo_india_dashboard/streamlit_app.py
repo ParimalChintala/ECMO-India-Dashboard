@@ -1,129 +1,117 @@
+# streamlit_app.py — ECMO India Live Dashboard
+# Place this file inside: ecmo_india_dashboard/
 
-import os, math
+import os
+from pathlib import Path
+from urllib.parse import quote_plus
+
 import pandas as pd
 import streamlit as st
-import plotly.express as px
-from datetime import datetime, date
 
-st.set_page_config(page_title="ECMO India - Live Dashboard", layout="wide")
+# ---------- Page setup ----------
+st.set_page_config(page_title="ECMO India – Live Dashboard", layout="wide")
 
-# -------- Settings via env vars --------
-DATA_SOURCE = os.environ.get("DATA_SOURCE", "csv")   # csv | gsheets
-CSV_PATH = os.environ.get("CSV_PATH", "ecmo_cases_sample.csv")
-GSHEET_URL = os.environ.get("GSHEET_URL", "")
+# ---------- Settings (change if you want) ----------
+# If you publish a Google Sheet "to the web" as CSV, paste that URL in STREAMLIT secrets or env:
+GSHEET_URL = os.environ.get("GSHEET_URL", "").strip()
+# If using a local CSV in the repo, set/keep this file name (relative to THIS file's folder):
+CSV_FILENAME = os.environ.get("CSV_PATH", "ecmo_cases.csv")
+# Auto-refresh interval (seconds) for cached data:
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", "60"))
-USE_SERVICE_ACCOUNT = os.environ.get("USE_SERVICE_ACCOUNT", "false").lower()=="true"
 
-REQUIRED_COLS = ["Initiation_Date","Hospital","Location_City","Location_State","ECMO_Type","Provisional_Diagnosis"]
-OPTIONAL_COLS = ["Status","Latitude","Longitude"]
-
+# ---------- Data loader ----------
 @st.cache_data(ttl=REFRESH_SECONDS)
-def load_data():
-    if DATA_SOURCE == "csv":
-        return pd.read_csv(CSV_PATH)
-    elif DATA_SOURCE == "gsheets":
-        if USE_SERVICE_ACCOUNT:
-            import gspread
-            from google.oauth2.service_account import Credentials
-            creds_dict = st.secrets["gcp_service_account"]
-            creds = Credentials.from_service_account_info(creds_dict, scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive.readonly",
-            ])
-            gc = gspread.authorize(creds)
-            sh = gc.open_by_url(GSHEET_URL)
-            ws_name = st.secrets.get("worksheet_name", "Sheet1")
-            ws = sh.worksheet(ws_name)
-            data = ws.get_all_records()
-            return pd.DataFrame(data)
-        else:
-            if not GSHEET_URL:
-                st.stop()
-            return pd.read_csv(GSHEET_URL)
+def load_data(gsheet_url: str, csv_filename: str) -> pd.DataFrame:
+    if gsheet_url:
+        # Works if the sheet is published as CSV (no extra packages needed)
+        df = pd.read_csv(gsheet_url)
     else:
-        st.error("Unknown DATA_SOURCE")
-        st.stop()
+        # Read from the CSV that lives in the SAME folder as this app
+        base = Path(__file__).parent
+        csv_path = Path(csv_filename)
+        if not csv_path.is_absolute():
+            csv_path = base / csv_path
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV not found at: {csv_path}")
+        df = pd.read_csv(csv_path)
+    return df
 
-df = load_data()
+# ---------- Safe Google Maps link builder ----------
+def build_maps_link(hospital: str, city: str, state: str) -> str:
+    q = " ".join(str(x) for x in [hospital, city, state] if str(x).strip())
+    return f"https://www.google.com/maps/search/?api=1&query={quote_plus(q)}"
 
-# Validate columns
-missing = [c for c in REQUIRED_COLS if c not in df.columns]
-if missing:
-    st.error(f"Missing required columns: {missing}. Expected columns: {REQUIRED_COLS + OPTIONAL_COLS}")
+# ---------- App body ----------
+st.title("🫀 ECMO India – Live Dashboard")
+
+try:
+    df = load_data(GSHEET_URL, CSV_FILENAME)
+except Exception as e:
+    st.error(
+        "Could not load data. If you're using a CSV, make sure "
+        f"`{CSV_FILENAME}` is inside the **ecmo_india_dashboard/** folder.\n\n"
+        f"Error: {e}"
+    )
     st.stop()
 
-# Parse dates
-if "Initiation_Date" in df.columns:
-    try:
-        df["Initiation_Date"] = pd.to_datetime(df["Initiation_Date"]).dt.date
-    except Exception:
-        pass
+# Normalize expected columns (keep whatever the file has)
+df.columns = [c.strip() for c in df.columns]
 
-# Derived metric: Days on ECMO (for non-decannulated cases)
-today = date.today()
-df["Days_on_ECMO"] = (pd.to_datetime(today) - pd.to_datetime(df["Initiation_Date"])).dt.days
+# If Google_Maps_Link column is missing, create it from Hospital + City + State
+if "Google_Maps_Link" not in df.columns:
+    # We will be liberal with column names to avoid key errors
+    hospital_col = next((c for c in df.columns if c.lower() == "hospital"), None)
+    city_col     = next((c for c in df.columns if c.lower() in ("location_city", "city")), None)
+    state_col    = next((c for c in df.columns if c.lower() in ("location_state", "state")), None)
 
-# Sidebar filters
-st.sidebar.header("Filters")
-state = st.sidebar.selectbox("State", ["All"] + sorted(df["Location_State"].dropna().unique().tolist()))
-ecmo_type = st.sidebar.selectbox("ECMO Type", ["All"] + sorted(df["ECMO_Type"].dropna().unique().tolist()))
-status_vals = ["All"] + sorted(df["Status"].dropna().unique().tolist()) if "Status" in df.columns else ["All"]
-status = st.sidebar.selectbox("Status", status_vals)
+    if hospital_col and city_col and state_col:
+        df["Google_Maps_Link"] = df.apply(
+            lambda r: build_maps_link(r.get(hospital_col, ""), r.get(city_col, ""), r.get(state_col, "")),
+            axis=1
+        )
 
-q = df.copy()
-if state != "All": q = q[q["Location_State"] == state]
-if ecmo_type != "All": q = q[q["ECMO_Type"] == ecmo_type]
-if "Status" in q.columns and status != "All": q = q[q["Status"] == status]
+# Make a separate “Map” link column for reliable clickable links
+if "Google_Maps_Link" in df.columns:
+    df["Map"] = df["Google_Maps_Link"]
 
-# KPI row
-c1,c2,c3,c4 = st.columns(4)
-with c1:
-    st.metric("Total Cases (filtered)", len(q))
-with c2:
-    if "Status" in q.columns:
-        active = (q["Status"] == "Active").sum()
-        st.metric("Active", int(active))
-    else:
-        st.metric("Active", "—")
-with c3:
-    st.metric("Median Days on ECMO", int(q["Days_on_ECMO"].median()) if len(q) else 0)
-with c4:
-    by_type = q["ECMO_Type"].value_counts()
-    vv = int(by_type.get("VV",0)); va = int(by_type.get("VA",0))
-    st.metric("VV / VA", f"{vv} / {va}")
-
-# Map (if lat/lon present)
-if "Latitude" in q.columns and "Longitude" in q.columns and q[["Latitude","Longitude"]].dropna().shape[0] > 0:
-    st.subheader("Geographic distribution")
-    fig_map = px.scatter_mapbox(
-        q.dropna(subset=["Latitude","Longitude"]),
-        lat="Latitude", lon="Longitude",
-        hover_name="Hospital",
-        hover_data={"Location_City":True, "Location_State":True, "ECMO_Type":True, "Days_on_ECMO":True, "Latitude":False, "Longitude":False},
-        color="ECMO_Type", zoom=4, height=450
+# Make Hospital name itself clickable if we have the link
+if "Google_Maps_Link" in df.columns and "Hospital" in df.columns:
+    df["Hospital"] = df.apply(
+        lambda r: f"[{r['Hospital']}]({r['Google_Maps_Link']})" if pd.notna(r.get("Google_Maps_Link", "")) else r["Hospital"],
+        axis=1
     )
-    fig_map.update_layout(mapbox_style="open-street-map", margin=dict(l=0,r=0,t=0,b=0))
-    st.plotly_chart(fig_map, use_container_width=True)
 
-# Charts
-st.subheader("Cases by State and ECMO Type")
-if len(q):
-    fig1 = px.histogram(q, x="Location_State", color="ECMO_Type", barmode="group")
-    st.plotly_chart(fig1, use_container_width=True)
+# Choose columns to display (include Age if present)
+default_cols = [
+    c for c in ["Initiation_Date", "Hospital", "Location_City", "Location_State",
+                "ECMO_Type", "Provisional_Diagnosis"] if c in df.columns
+]
+if "Age" in df.columns:
+    default_cols.append("Age")
+if "Map" in df.columns:
+    default_cols.append("Map")
 
-    st.subheader("New ECMO Initiations Over Time")
-    q_time = q.copy()
-    if "Initiation_Date" in q_time.columns:
-        q_time["Initiation_Date"] = pd.to_datetime(q_time["Initiation_Date"])
-        ts = q_time.groupby(q_time["Initiation_Date"].dt.to_period("D")).size().reset_index(name="count")
-        ts["Initiation_Date"] = ts["Initiation_Date"].dt.to_timestamp()
-        fig2 = px.line(ts, x="Initiation_Date", y="count", markers=True)
-        st.plotly_chart(fig2, use_container_width=True)
+# If none of the expected columns exist, just show the whole frame
+if not default_cols:
+    default_cols = list(df.columns)
 
-# Table
-st.subheader("ECMO Cases (Filtered)")
-display_cols = ["Initiation_Date","Hospital","Location_City","Location_State","ECMO_Type","Provisional_Diagnosis","Status","Days_on_ECMO"]
-display_cols = [c for c in display_cols if c in q.columns]
-st.dataframe(q[display_cols].sort_values(by="Initiation_Date", ascending=False), use_container_width=True)
+# ---------- Table ----------
+st.dataframe(
+    df[default_cols],
+    use_container_width=True,
+    column_config={
+        # turns the Map column into clickable links with a label
+        "Map": st.column_config.LinkColumn("Google Maps")
+    }
+)
 
-st.caption("Data refresh every {}s. Expected columns: Initiation_Date, Hospital, Location_City, Location_State, ECMO_Type, Provisional_Diagnosis (optional: Status, Latitude, Longitude).".format(REFRESH_SECONDS))
+# ---------- Controls ----------
+col1, col2 = st.columns([1, 3])
+with col1:
+    if st.button("🔄 Reload data"):
+        st.cache_data.clear()
+
+st.caption(
+    "Tip: Keep your CSV named **ecmo_cases.csv** inside the **ecmo_india_dashboard/** folder. "
+    "If you add an **Age** column or **Google_Maps_Link**, they’ll appear automatically."
+)
