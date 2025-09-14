@@ -1,4 +1,4 @@
-# streamlit_app.py — ECMO India Live Dashboard (show ALL columns; one Google Maps column)
+# streamlit_app.py — ECMO India Live Dashboard (hide Initiation Date & Email address)
 
 from urllib.parse import quote_plus
 import pandas as pd
@@ -11,8 +11,8 @@ st.set_page_config(page_title="ECMO India – Live Dashboard", layout="wide")
 st.title("🫀 ECMO India – Live Dashboard")
 
 # ---------------- Your Google Sheet ----------------
-SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # <-- keep or change
-WORKSHEET_NAME = "Form responses 1"                         # <-- change if you use a view tab
+SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # <- change if needed
+WORKSHEET_NAME = "Form responses 1"                         # <- change if your tab name differs
 
 # ---------------- Auth / loader ----------------
 SCOPE = [
@@ -68,10 +68,16 @@ def build_maps_link(hospital: str, city: str, state: str) -> str:
     return f"https://www.google.com/maps/search/?api=1&query={quote_plus(' '.join(parts))}"
 
 def find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """Case-insensitive finder with partial matching support."""
     cols_lc = {c.lower(): c for c in df.columns}
     for cand in candidates:
+        cand = cand.lower()
+        # exact first
+        if cand in cols_lc:
+            return cols_lc[cand]
+        # then partial
         for lc, orig in cols_lc.items():
-            if lc == cand or cand in lc:
+            if cand in lc:
                 return orig
     return None
 
@@ -93,6 +99,16 @@ except Exception as e:
 # Clean headers (trim spaces)
 df.columns = [c.strip() for c in df.columns]
 
+# Drop columns you don't want to show
+to_drop = []
+init_date_col = find_col(df, ["initiation date"])         # e.g., "Initiation Date"
+email_col     = find_col(df, ["email address", "email"])  # e.g., "Email address"
+for c in (init_date_col, email_col):
+    if c:
+        to_drop.append(c)
+if to_drop:
+    df = df.drop(columns=to_drop, errors="ignore")
+
 # Add Google Maps link if we can find hospital, city, state
 hosp_col  = find_col(df, ["hospital"])
 city_col  = find_col(df, ["location city", "city"])
@@ -106,8 +122,8 @@ if "Google_Maps_Link" not in df.columns and all([hosp_col, city_col, state_col])
 
 # Keep only the single rightmost clickable column: "Google Maps"
 if "Google_Maps_Link" in df.columns:
-    df["Google Maps"] = df["Google_Maps_Link"]    # clickable label
-    df = df.drop(columns=["Google_Maps_Link"])    # drop the raw left column
+    df["Google Maps"] = df["Google_Maps_Link"]    # nicer label
+    df = df.drop(columns=["Google_Maps_Link"])    # drop the raw column
 
 # Add S.No starting at 1
 df = df.reset_index(drop=True)
