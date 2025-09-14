@@ -1,6 +1,7 @@
 # streamlit_app.py — ECMO India Live Dashboard (Sheets + charts, tolerant headers)
 
 from urllib.parse import quote_plus
+import re
 import pandas as pd
 import streamlit as st
 import gspread
@@ -13,7 +14,7 @@ st.title("🫀 ECMO India – Live Dashboard")
 
 # ---------------- Your Google Sheet ----------------
 SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # spreadsheet id
-WORKSHEET_NAME = "Form responses 1"                         # exact tab name
+WORKSHEET_NAME = "Form responses 15"                         # exact tab name you're using now
 
 # ---------------- Auth / loader ----------------
 SCOPE = [
@@ -37,6 +38,23 @@ def _dedupe_headers(headers: list[str]) -> list[str]:
             result.append(f"{key} ({seen[key]})")
     return result
 
+def _newest_form_responses_tab(worksheets) -> str | None:
+    """
+    Return the newest 'Form responses' tab by numeric suffix.
+    Examples: 'Form responses', 'Form responses 1', 'Form responses 15'
+    """
+    pattern = re.compile(r"^Form responses(?: (\d+))?$", re.IGNORECASE)
+    best = None
+    best_num = -1
+    for w in worksheets:
+        m = pattern.match(w.title.strip())
+        if m:
+            num = int(m.group(1) or 0)
+            if num > best_num:
+                best_num = num
+                best = w.title
+    return best
+
 @st.cache_data(ttl=60)
 def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
     """Load a worksheet into a DataFrame, allowing duplicate headers safely."""
@@ -46,15 +64,24 @@ def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_id)
 
-    # Try exact tab name; if missing, fall back to first sheet with a notice
+    # Try exact tab name; if missing, fall back to newest "Form responses*" tab or first sheet
     try:
         ws = sh.worksheet(ws_name)
     except gspread.exceptions.WorksheetNotFound:
-        ws = sh.sheet1
-        st.warning(
-            f"Worksheet '{ws_name}' not found — using first tab: '{ws.title}'. "
-            f"Available tabs: {[w.title for w in sh.worksheets()]}"
-        )
+        tabs = sh.worksheets()
+        newest = _newest_form_responses_tab(tabs)
+        if newest:
+            ws = sh.worksheet(newest)
+            st.warning(
+                f"Worksheet '{ws_name}' not found — using newest responses tab: '{ws.title}'. "
+                f"Available tabs include: {[w.title for w in tabs]}"
+            )
+        else:
+            ws = sh.sheet1
+            st.warning(
+                f"Worksheet '{ws_name}' not found — using first tab: '{ws.title}'. "
+                f"Available tabs: {[w.title for w in tabs]}"
+            )
 
     # Pull raw grid values; FIRST ROW = headers (may contain duplicates)
     values = ws.get_all_values() or []
@@ -82,6 +109,12 @@ def first_nonempty(a, b):
     b_str = str(b).strip()
     return a if a_str else (b if b_str else "")
 
+def pick(cols, *candidates):
+    for c in candidates:
+        if c and c in cols:
+            return c
+    return None
+
 # ---------------- Load + tidy data ----------------
 try:
     df = load_data_from_sheet(SHEET_ID, WORKSHEET_NAME)
@@ -96,21 +129,34 @@ except Exception as e:
     )
     st.stop()
 
-# Map flexible column names
-def pick(cols, *candidates):
-    for c in candidates:
-        if c in cols:
-            return c
-    return None
+# ---- Flexible column mapping (extended for your new form) ----
+# Timestamp: prefer 'Timestamp'; else combine 'ECMO initiation date' + 'ECMO initiation time'
+col_time = pick(df.columns, "Timestamp")
+col_date = pick(df.columns, "ECMO initiation date", "Date of initiation")
+col_time_only = pick(df.columns, "ECMO initiation time", "Initiation time")
 
-col_time   = pick(df.columns, "Timestamp")
-col_hosp   = pick(df.columns, "Hospital")
-col_city   = pick(df.columns, "Location City", "Location_City")
-col_state  = pick(df.columns, "Location State", "Location_State")
-col_ecmo   = pick(df.columns, "ECMO Type", "ECMO_Type")
-col_diag   = pick(df.columns, "Provisional Diagnosis", "Provisional diagnos", "Provisional Diagnos")
+if not col_time and (col_date or col_time_only):
+    df["Initiation DateTime"] = df.apply(
+        lambda r: f"{str(r.get(col_date, '')).strip()} {str(r.get(col_time_only, '')).strip()}".strip(),
+        axis=1
+    )
+    col_time = "Initiation DateTime"
+
+# Hospital (now also matches "Initiation Hospital")
+col_hosp  = pick(df.columns, "Hospital", "Initiation Hospital")
+
+# City / State (State also matches your UT/Outside variant)
+col_city  = pick(df.columns, "Location City", "Location_City")
+col_state = pick(df.columns, "Location State", "Location_State", "Location State/UT/Outside India")
+
+# ECMO type & Diagnosis
+col_ecmo  = pick(df.columns, "ECMO Type", "ECMO_Type")
+col_diag  = pick(df.columns, "Provisional Diagnosis", "Provisional diagnos", "Provisional Diagnos")
+
+# Age, Senior intensivist
 col_age    = pick(df.columns, "Age of the patient", "Age")
 col_senior = pick(df.columns, "Name of Senior intensivist supervising the procedure")
+
 # handle duplicates coming from dedup (e.g., "Miscellaneous comments", "Miscellaneous comments (2)")
 col_misc1  = pick(df.columns, "Miscellaneous comments", "Miscellaneous comments (1)")
 col_misc2  = pick(df.columns, "Miscellaneous comments (2)")
@@ -126,7 +172,7 @@ elif col_misc2:
     df.rename(columns={col_misc2: "Miscellaneous comments"}, inplace=True)
     col_misc = "Miscellaneous comments"
 
-# Single Google Maps link
+# Single Google Maps link (use hospital + city + state)
 if col_hosp or col_city or col_state:
     df["Google Maps"] = df.apply(
         lambda r: build_maps_link(r.get(col_hosp, ""), r.get(col_city, ""), r.get(col_state, "")),
@@ -136,7 +182,7 @@ if col_hosp or col_city or col_state:
 # Add 1-based serial number
 df.insert(0, "S.No", range(1, len(df) + 1))
 
-# Choose table columns (no email / initiation date)
+# Choose table columns (no email / old initiation date columns)
 table_cols = [
     "S.No", col_time, col_hosp, col_city, col_state, col_ecmo, col_diag,
     col_age, col_senior, col_misc, "Google Maps"
