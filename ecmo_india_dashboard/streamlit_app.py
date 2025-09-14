@@ -1,4 +1,4 @@
-# streamlit_app.py — ECMO India Live Dashboard (robust + diagnostics + S.No + Misc)
+# streamlit_app.py — ECMO India Live Dashboard (robust + diagnostics + S.No + Misc, hide index)
 
 from urllib.parse import quote_plus
 import pandas as pd
@@ -134,6 +134,7 @@ try:
     st.dataframe(
         df[display_cols],
         use_container_width=True,
+        hide_index=True,  # <<< hide the 0-based dataframe index
         column_config={
             "S.No": st.column_config.NumberColumn("S.No"),
             "Map": st.column_config.LinkColumn("Google Maps"),
@@ -154,4 +155,4 @@ try:
 except Exception as e:
     st.error("⚠️ Rendering error — see details below.")
     st.exception(e)
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, use_container_width=True, hide_index=True)
