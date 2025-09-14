@@ -1,4 +1,5 @@
-# streamlit_app.py — ECMO India Live Dashboard (robust + diagnostics + S.No + Misc, hide index)
+# streamlit_app.py — ECMO India Live Dashboard
+# (robust headers + diagnostics + S.No + Misc + state-wise pie chart)
 
 from urllib.parse import quote_plus
 import pandas as pd
@@ -134,12 +135,42 @@ try:
     st.dataframe(
         df[display_cols],
         use_container_width=True,
-        hide_index=True,  # <<< hide the 0-based dataframe index
+        hide_index=True,  # hide the 0-based dataframe index
         column_config={
             "S.No": st.column_config.NumberColumn("S.No"),
             "Map": st.column_config.LinkColumn("Google Maps"),
         },
     )
+
+    # ---------- Charts ----------
+    # Pie chart: ECMO cases by state
+    if col_state and not df.empty:
+        # Clean/aggregate state values
+        counts = (
+            df[col_state].astype(str).str.strip()
+            .replace({"": None, "nan": None})
+            .dropna()
+            .value_counts()
+            .sort_values(ascending=False)
+        )
+
+        if not counts.empty:
+            import matplotlib.pyplot as plt  # local import
+
+            st.subheader("ECMO cases by State")
+            fig, ax = plt.subplots()
+            ax.pie(
+                counts.values,
+                labels=counts.index,
+                autopct="%1.0f%%",
+                startangle=90,
+            )
+            ax.axis("equal")  # make it a circle
+            st.pyplot(fig)
+        else:
+            st.info("No state values found to chart yet.")
+    else:
+        st.info("Add some rows with a state to see the state-wise pie chart.")
 
     # Reload button
     col1, _ = st.columns([1, 4])
