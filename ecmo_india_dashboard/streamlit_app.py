@@ -1,19 +1,19 @@
-# streamlit_app.py — ECMO India Live Dashboard (dedupe comment columns)
+# streamlit_app.py — ECMO India Live Dashboard + Charts (Hospital Treemap)
 
 from urllib.parse import quote_plus
 import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-import re
+import plotly.express as px
 
 # ---------------- Page setup ----------------
 st.set_page_config(page_title="ECMO India – Live Dashboard", layout="wide")
 st.title("🫀 ECMO India – Live Dashboard")
 
 # ---------------- Your Google Sheet ----------------
-SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # change if needed
-WORKSHEET_NAME = "Form responses 1"                         # change if needed
+SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"
+WORKSHEET_NAME = "Form Responses 1"  # change if your tab name differs
 
 # ---------------- Auth / loader ----------------
 SCOPE = [
@@ -21,9 +21,10 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+
 @st.cache_data(ttl=60)
-def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
-    """Read the worksheet and tolerate duplicate/blank headers."""
+def load_raw_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
+    """Load values from the worksheet, keeping duplicate headers safe."""
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPE
     )
@@ -33,7 +34,7 @@ def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
     try:
         ws = sh.worksheet(ws_name)
     except gspread.exceptions.WorksheetNotFound:
-        tabs = [(w.title, getattr(w, "id", None)) for w in sh.worksheets()]
+        tabs = [w.title for w in sh.worksheets()]
         if tabs:
             ws = sh.sheet1
             st.warning(
@@ -43,135 +44,208 @@ def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
         else:
             raise RuntimeError("This spreadsheet has no worksheets.")
 
-    rows = ws.get_all_values()
-    if not rows:
+    values = ws.get_all_values()  # full grid (strings)
+    if not values:
         return pd.DataFrame()
 
-    # Make headers unique and non-empty
-    raw_headers = [h.strip() for h in (rows[0] or [])]
-    headers, seen = [], {}
-    for i, h in enumerate(raw_headers):
-        base = h or f"Column_{i+1}"
-        name, k = base, 1
-        while name in seen:
-            k += 1
-            name = f"{base} ({k})"
-        seen[name] = True
-        headers.append(name)
+    headers = [h.strip() for h in values[0]]
+    rows = values[1:]
 
-    df = pd.DataFrame(rows[1:], columns=headers)
-    df = df.replace("", pd.NA).dropna(how="all").fillna("")
+    # Make headers unique if needed (e.g., duplicate 'Miscellaneous comments')
+    seen = {}
+    unique_headers = []
+    for h in headers:
+        key = h if h else "Column"
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] > 1:
+            unique_headers.append(f"{key} ({seen[key]})")
+        else:
+            unique_headers.append(key)
+
+    df = pd.DataFrame(rows, columns=unique_headers)
+    df = df.replace("", pd.NA).dropna(how="all")
     return df
 
-# ---------------- Helpers ----------------
-def build_maps_link(hospital: str, city: str, state: str) -> str:
-    parts = [str(x).strip() for x in [hospital, city, state] if str(x).strip()]
-    return f"https://www.google.com/maps/search/?api=1&query={quote_plus(' '.join(parts))}"
 
-def find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    """Case-insensitive finder with partial matching support."""
-    cols_lc = {c.lower(): c for c in df.columns}
-    for cand in candidates:
-        cand = cand.lower()
-        if cand in cols_lc:       # exact
-            return cols_lc[cand]
-        for lc, orig in cols_lc.items():  # partial
-            if cand in lc:
-                return orig
+def pick(df: pd.DataFrame, *names):
+    """Return the first column name that exists (case-sensitive)."""
+    for n in names:
+        if n in df.columns:
+            return n
     return None
 
-def coalesce_duplicates(df: pd.DataFrame, base_name: str) -> pd.DataFrame:
-    """
-    Combine duplicate columns like 'X', 'X (2)', 'X (3)' into a single 'X',
-    taking the first non-empty per row, then drop the others.
-    """
-    pattern = re.compile(rf"^{re.escape(base_name)}(\s\(\d+\))?$", re.IGNORECASE)
-    dup_cols = [c for c in df.columns if pattern.match(c.strip())]
 
-    if not dup_cols:
-        return df
-
-    # Build a single column with first non-empty across duplicates
-    def first_nonempty(row):
-        for c in dup_cols:
-            v = str(row.get(c, "")).strip()
-            if v:
-                return v
+def build_maps_link(hospital: str, city: str, state: str) -> str:
+    parts = [str(x).strip() for x in [hospital, city, state] if str(x).strip()]
+    if not parts:
         return ""
+    return f"https://www.google.com/maps/search/?api=1&query={quote_plus(' '.join(parts))}"
 
-    df[base_name] = df.apply(first_nonempty, axis=1)
 
-    # Drop all duplicates except the canonical 'base_name'
-    to_drop = [c for c in dup_cols if c != base_name]
-    if to_drop:
-        df = df.drop(columns=to_drop, errors="ignore")
-
-    return df
-
-# ---------------- Load data ----------------
+# ---------------- Load + Clean ----------------
 try:
-    df = load_data_from_sheet(SHEET_ID, WORKSHEET_NAME)
+    df = load_raw_from_sheet(SHEET_ID, WORKSHEET_NAME)
 except Exception as e:
     st.error(
         "❌ Could not load data from Google Sheets.\n\n"
         f"Details: {e}\n\n"
         "Checklist:\n"
-        "• Sheet shared with the service account (Editor)\n"
-        "• SHEET_ID is correct\n"
+        "• Sheet is shared with the service account (Editor)\n"
+        "• SHEET_ID matches the part between /d/ and /edit\n"
         "• WORKSHEET_NAME matches the bottom tab name exactly"
     )
     st.stop()
 
-# ---------------- Enrich & display ----------------
-# Clean headers
-df.columns = [c.strip() for c in df.columns]
+if df.empty:
+    st.info("No rows yet. Add responses to the sheet, then click **Reload data**.")
+else:
+    # Trim header whitespace and normalize
+    df.columns = [c.strip() for c in df.columns]
 
-# Collapse duplicate 'Miscellaneous comments' columns into one
-df = coalesce_duplicates(df, "Miscellaneous comments")
+    # Combine duplicate/variant "Misc comments" columns into a single one (keep first non-empty per row)
+    misc_like = [c for c in df.columns if c.lower().startswith("misc")]
+    if misc_like:
+        df["Miscellaneous comments"] = None
+        for c in misc_like:
+            df["Miscellaneous comments"] = df["Miscellaneous comments"].fillna(df[c])
+        for c in misc_like:
+            if c != "Miscellaneous comments":
+                df.drop(columns=c, inplace=True, errors="ignore")
 
-# Drop columns you don't want to show (Initiation Date & Email address)
-to_drop = []
-init_date_col = find_col(df, ["initiation date"])
-email_col     = find_col(df, ["email address", "email"])
-for c in (init_date_col, email_col):
-    if c:
-        to_drop.append(c)
-if to_drop:
-    df = df.drop(columns=to_drop, errors="ignore")
-
-# Add Google Maps link if we can find hospital, city, state
-hosp_col  = find_col(df, ["hospital"])
-city_col  = find_col(df, ["location city", "city"])
-state_col = find_col(df, ["location state", "state"])
-
-if "Google_Maps_Link" not in df.columns and all([hosp_col, city_col, state_col]) and not df.empty:
-    df["Google_Maps_Link"] = df.apply(
-        lambda r: build_maps_link(r.get(hosp_col, ""), r.get(city_col, ""), r.get(state_col, "")),
-        axis=1
+    # Map likely column names
+    col_time = pick(df, "Timestamp", "Time stamp")
+    col_init = pick(df, "Initiation time", "Initiation date", "Initation date")
+    col_hosp = pick(df, "Hospital")
+    col_city = pick(df, "Location City", "Location city", "City", "Location_City")
+    col_state = pick(df, "Location State", "Location state", "State", "Location_State")
+    col_ecmo = pick(df, "ECMO Type", "ECMO type", "Type", "Type of ECMO", "ECMO_Type")
+    col_diag = pick(df, "Provisional Diagnosis", "Provisional diagnosis", "Diagnosis")
+    col_age = pick(df, "Age of the patient", "Age")
+    col_email = pick(df, "Email address", "Email")
+    col_senior = pick(
+        df, "Name of Senior intensivist supervising the procedure",
+        "Name of Senior intensivist supervising the p"
     )
 
-# Keep only one rightmost clickable column: "Google Maps"
-if "Google_Maps_Link" in df.columns:
-    df["Google Maps"] = df["Google_Maps_Link"]
-    df = df.drop(columns=["Google_Maps_Link"])
+    # Build Google Maps link
+    if col_hosp and (col_city or col_state) and "Google Maps" not in df.columns:
+        df["Google Maps"] = df.apply(
+            lambda r: build_maps_link(
+                r.get(col_hosp, ""), r.get(col_city, ""), r.get(col_state, "")
+            ),
+            axis=1,
+        )
 
-# Add S.No starting at 1
-df = df.reset_index(drop=True)
-df.insert(0, "S.No", range(1, len(df) + 1))
+    # -------- Table (hide Initiation date & Email) --------
+    df_display = df.copy()
+    df_display.insert(0, "S.No", range(1, len(df_display) + 1))
 
-# Ensure Google Maps is last
-display_cols = [c for c in df.columns if c != "Google Maps"]
-if "Google Maps" in df.columns:
-    display_cols = display_cols + ["Google Maps"]
+    preferred = [
+        col_time,
+        col_init,               # hidden below
+        col_hosp,
+        col_city,
+        col_state,
+        col_ecmo,
+        col_diag,
+        col_age,
+        col_senior,
+        "Miscellaneous comments",
+        "Google Maps",
+    ]
+    display_cols = [c for c in preferred if c and c in df_display.columns]
 
-st.dataframe(
-    df[display_cols],
-    use_container_width=True,
-    column_config={"Google Maps": st.column_config.LinkColumn("Google Maps")},
-)
+    if col_init in display_cols:
+        display_cols.remove(col_init)
+    if col_email in display_cols:
+        display_cols.remove(col_email)
 
-# Reload button
-col1, _ = st.columns([1, 5])
-with col1:
-    if st.button("🔄 Reload data"):
-        st.cache_data.clear()
+    display_cols = ["S.No"] + display_cols
+
+    st.dataframe(
+        df_display[display_cols],
+        use_container_width=True,
+        column_config={"Google Maps": st.column_config.LinkColumn("Google Maps")},
+    )
+
+    # Controls
+    col_btn, _ = st.columns([1, 8])
+    with col_btn:
+        if st.button("🔄 Reload data"):
+            st.cache_data.clear()
+
+    st.markdown("---")
+    st.subheader("📊 ECMO Overview (Interactive)")
+
+    # -------- Helpers --------
+    def safe_counts(series: pd.Series) -> pd.DataFrame:
+        s = (
+            series.dropna()
+            .astype(str)
+            .str.strip()
+            .replace({"": pd.NA})
+            .dropna()
+        )
+        if s.empty:
+            return pd.DataFrame(columns=["Label", "Count"])
+        counts = s.value_counts().reset_index()
+        counts.columns = ["Label", "Count"]
+        return counts.sort_values("Count", ascending=False)
+
+    # ECMO Type: donut + bar
+    if col_ecmo and col_ecmo in df.columns:
+        c = safe_counts(df[col_ecmo])
+        if not c.empty:
+            left, right = st.columns(2)
+            with left:
+                pie = px.pie(
+                    c, names="Label", values="Count",
+                    hole=0.45, title="ECMO Type — Share"
+                )
+                pie.update_traces(textinfo="percent+label")
+                st.plotly_chart(pie, use_container_width=True)
+            with right:
+                bar = px.bar(
+                    c, x="Count", y="Label", orientation="h",
+                    title="ECMO Type — Counts"
+                )
+                bar.update_layout(yaxis_title="", xaxis_title="Cases")
+                st.plotly_chart(bar, use_container_width=True)
+        else:
+            st.info("No data found for ECMO Type.")
+    else:
+        st.info("ECMO Type column not found.")
+
+    # State-wise: horizontal bar
+    if col_state and col_state in df.columns:
+        c = safe_counts(df[col_state])
+        if not c.empty:
+            bar = px.bar(
+                c, x="Count", y="Label", orientation="h",
+                title="State-wise ECMO Cases"
+            )
+            bar.update_layout(yaxis_title="", xaxis_title="Cases")
+            st.plotly_chart(bar, use_container_width=True)
+        else:
+            st.info("No state values to plot.")
+    else:
+        st.info("State column not found.")
+
+    # Hospital-wise: TREEMAP (replaces horizontal bar)
+    if col_hosp and col_hosp in df.columns:
+        c = safe_counts(df[col_hosp])
+        if not c.empty:
+            # Treemap with hospital names as leaves sized by case count
+            tree = px.treemap(
+                c,
+                path=["Label"],          # one level: hospital
+                values="Count",
+                title="Hospital-wise ECMO Cases (Treemap)",
+            )
+            # show counts on boxes
+            tree.update_traces(textinfo="label+value")
+            st.plotly_chart(tree, use_container_width=True)
+        else:
+            st.info("No hospital values to plot.")
+    else:
+        st.info("Hospital column not found.")
