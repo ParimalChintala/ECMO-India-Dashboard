@@ -1,4 +1,4 @@
-# streamlit_app.py — ECMO India Live Dashboard (Google Sheets only, robust headers)
+# streamlit_app.py — ECMO India Live Dashboard (Google Sheets only, robust headers incl. Misc)
 
 from urllib.parse import quote_plus
 import pandas as pd
@@ -87,6 +87,8 @@ col_state  = pick(df, "Location State", "Location_State", "State")
 col_ecmo   = pick(df, "ECMO Type", "ECMO_Type")
 col_diag   = pick(df, "Provisional Diagnosis", "Provisional Diagnos")
 col_age    = pick(df, "Age of the patient", "Age")
+# NEW: Misc column (matches several possible headers)
+col_misc   = pick(df, "Misc comments", "Misc comment", "Misc", "Comments", "Notes", "Remarks")
 
 # Build Google_Maps_Link if missing and enough info is present
 if "Google_Maps_Link" not in df.columns and all(x for x in [col_hosp, col_city, col_state]) and not df.empty:
@@ -101,29 +103,12 @@ if "Google_Maps_Link" not in df.columns and all(x for x in [col_hosp, col_city, 
 if "Google_Maps_Link" in df.columns:
     df["Map"] = df["Google_Maps_Link"]
 
-# Construct the display table with whatever exists
+# Construct the display table with whatever exists (Misc included)
 display_cols = []
-for c in [col_time, col_init, col_hosp, col_city, col_state, col_ecmo, col_diag, col_age, "Map"]:
+for c in [col_time, col_init, col_hosp, col_city, col_state, col_ecmo, col_diag, col_age, col_misc, "Map"]:
     if c and (c in df.columns or c == "Map"):
         display_cols.append(c)
 
 # If nothing matched, show everything
 if not display_cols:
-    display_cols = list(df.columns)
-
-st.dataframe(
-    df[display_cols],
-    use_container_width=True,
-    column_config={"Map": st.column_config.LinkColumn("Google Maps")},
-)
-
-# Reload button
-col1, _ = st.columns([1, 4])
-with col1:
-    if st.button("🔄 Reload data"):
-        st.cache_data.clear()
-
-st.caption(
-    "Data source: Google Sheet → tab 'Form responses 1'. "
-    "Edit the sheet and click Reload (or wait ~60s cache)."
-)
+    di
