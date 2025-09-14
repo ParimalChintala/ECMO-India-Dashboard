@@ -1,18 +1,19 @@
-# streamlit_app.py — ECMO India Live Dashboard (hide Initiation Date & Email address)
+# streamlit_app.py — ECMO India Live Dashboard (dedupe comment columns)
 
 from urllib.parse import quote_plus
 import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
+import re
 
 # ---------------- Page setup ----------------
 st.set_page_config(page_title="ECMO India – Live Dashboard", layout="wide")
 st.title("🫀 ECMO India – Live Dashboard")
 
 # ---------------- Your Google Sheet ----------------
-SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # <- change if needed
-WORKSHEET_NAME = "Form responses 1"                         # <- change if your tab name differs
+SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # change if needed
+WORKSHEET_NAME = "Form responses 1"                         # change if needed
 
 # ---------------- Auth / loader ----------------
 SCOPE = [
@@ -72,14 +73,40 @@ def find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     cols_lc = {c.lower(): c for c in df.columns}
     for cand in candidates:
         cand = cand.lower()
-        # exact first
-        if cand in cols_lc:
+        if cand in cols_lc:       # exact
             return cols_lc[cand]
-        # then partial
-        for lc, orig in cols_lc.items():
+        for lc, orig in cols_lc.items():  # partial
             if cand in lc:
                 return orig
     return None
+
+def coalesce_duplicates(df: pd.DataFrame, base_name: str) -> pd.DataFrame:
+    """
+    Combine duplicate columns like 'X', 'X (2)', 'X (3)' into a single 'X',
+    taking the first non-empty per row, then drop the others.
+    """
+    pattern = re.compile(rf"^{re.escape(base_name)}(\s\(\d+\))?$", re.IGNORECASE)
+    dup_cols = [c for c in df.columns if pattern.match(c.strip())]
+
+    if not dup_cols:
+        return df
+
+    # Build a single column with first non-empty across duplicates
+    def first_nonempty(row):
+        for c in dup_cols:
+            v = str(row.get(c, "")).strip()
+            if v:
+                return v
+        return ""
+
+    df[base_name] = df.apply(first_nonempty, axis=1)
+
+    # Drop all duplicates except the canonical 'base_name'
+    to_drop = [c for c in dup_cols if c != base_name]
+    if to_drop:
+        df = df.drop(columns=to_drop, errors="ignore")
+
+    return df
 
 # ---------------- Load data ----------------
 try:
@@ -96,13 +123,16 @@ except Exception as e:
     st.stop()
 
 # ---------------- Enrich & display ----------------
-# Clean headers (trim spaces)
+# Clean headers
 df.columns = [c.strip() for c in df.columns]
 
-# Drop columns you don't want to show
+# Collapse duplicate 'Miscellaneous comments' columns into one
+df = coalesce_duplicates(df, "Miscellaneous comments")
+
+# Drop columns you don't want to show (Initiation Date & Email address)
 to_drop = []
-init_date_col = find_col(df, ["initiation date"])         # e.g., "Initiation Date"
-email_col     = find_col(df, ["email address", "email"])  # e.g., "Email address"
+init_date_col = find_col(df, ["initiation date"])
+email_col     = find_col(df, ["email address", "email"])
 for c in (init_date_col, email_col):
     if c:
         to_drop.append(c)
@@ -120,20 +150,19 @@ if "Google_Maps_Link" not in df.columns and all([hosp_col, city_col, state_col])
         axis=1
     )
 
-# Keep only the single rightmost clickable column: "Google Maps"
+# Keep only one rightmost clickable column: "Google Maps"
 if "Google_Maps_Link" in df.columns:
-    df["Google Maps"] = df["Google_Maps_Link"]    # nicer label
-    df = df.drop(columns=["Google_Maps_Link"])    # drop the raw column
+    df["Google Maps"] = df["Google_Maps_Link"]
+    df = df.drop(columns=["Google_Maps_Link"])
 
 # Add S.No starting at 1
 df = df.reset_index(drop=True)
 df.insert(0, "S.No", range(1, len(df) + 1))
 
-# Put Google Maps as the last column (if present)
+# Ensure Google Maps is last
+display_cols = [c for c in df.columns if c != "Google Maps"]
 if "Google Maps" in df.columns:
-    display_cols = [c for c in df.columns if c != "Google Maps"] + ["Google Maps"]
-else:
-    display_cols = list(df.columns)
+    display_cols = display_cols + ["Google Maps"]
 
 st.dataframe(
     df[display_cols],
