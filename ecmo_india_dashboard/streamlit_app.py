@@ -12,7 +12,7 @@ st.title("🫀 ECMO India – Live Dashboard")
 
 # ---------------- Your Google Sheet (hard-coded) ----------------
 SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # from your URL
-WORKSHEET_NAME = "Form responses 1"                          # exact tab name (case/space sensitive)
+WORKSHEET_NAME = "Form responses 1"                          # bottom tab name (case/space sensitive)
 
 # ---------------- Auth / loader ----------------
 SCOPE = [
@@ -31,13 +31,12 @@ def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
     # open spreadsheet (404 here => wrong ID or not shared with service account)
     sh = gc.open_by_key(sheet_id)
 
-    # open worksheet by name; fallback to first sheet with helpful message
+    # try exact worksheet name, else fall back to first tab with a warning
     try:
         ws = sh.worksheet(ws_name)
     except gspread.exceptions.WorksheetNotFound:
         tabs = [(w.title, getattr(w, "id", None)) for w in sh.worksheets()]
         if tabs:
-            # fallback to first tab so the app still renders
             ws = sh.sheet1
             st.warning(
                 f"Worksheet '{ws_name}' not found — using first tab: '{ws.title}'. "
@@ -46,7 +45,14 @@ def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
         else:
             raise RuntimeError("This spreadsheet has no worksheets.")
 
+    # pull records (rows below the header)
     records = ws.get_all_records()
+
+    # if no rows yet, build an empty DF with the header row so the table still renders
+    if not records:
+        headers = ws.row_values(1) or []
+        return pd.DataFrame(columns=[h.strip() for h in headers])
+
     return pd.DataFrame(records)
 
 # ---------------- Helpers ----------------
@@ -86,9 +92,9 @@ df.columns = [c.strip() for c in df.columns]
 # Build Google_Maps_Link if missing and enough info is present
 if "Google_Maps_Link" not in df.columns:
     hosp_col  = next((c for c in df.columns if c.lower() == "hospital"), None)
-    city_col  = next((c for c in df.columns if c.lower() in ("location_city", "city")), None)
-    state_col = next((c for c in df.columns if c.lower() in ("location_state", "state")), None)
-    if hosp_col and city_col and state_col:
+    city_col  = next((c for c in df.columns if c.lower() in ("location city", "location_city", "city")), None)
+    state_col = next((c for c in df.columns if c.lower() in ("location state", "location_state", "state")), None)
+    if hosp_col and city_col and state_col and not df.empty:
         df["Google_Maps_Link"] = df.apply(
             lambda r: build_maps_link(
                 r.get(hosp_col, ""), r.get(city_col, ""), r.get(state_col, "")
@@ -101,7 +107,7 @@ if "Google_Maps_Link" in df.columns:
     df["Map"] = df["Google_Maps_Link"]
 
 # Make Hospital clickable when link available
-if "Google_Maps_Link" in df.columns and "Hospital" in df.columns:
+if "Google_Maps_Link" in df.columns and "Hospital" in df.columns and not df.empty:
     df["Hospital"] = df.apply(
         lambda r: (
             f"[{r['Hospital']}]({r['Google_Maps_Link']})"
@@ -113,12 +119,12 @@ if "Google_Maps_Link" in df.columns and "Hospital" in df.columns:
 
 # Columns to show (fall back to all if missing)
 cols_pref = [
-    "Initiation date",          # as seen in your sheet
+    "Initiation date",
     "Hospital",
-    "Location_City",
-    "Location_State",
-    "ECMO_Type",
-    "Provisional Diagnos",      # keep your exact header spelling
+    "Location City",
+    "Location State",
+    "ECMO Type",
+    "Provisional Diagnos",
 ]
 cols = [c for c in cols_pref if c in df.columns]
 if "Age of the patient" in df.columns:
@@ -129,7 +135,7 @@ if not cols:
     cols = list(df.columns)
 
 st.dataframe(
-    df[cols],
+    df[cols] if not df.empty else df,  # show headers even if empty
     use_container_width=True,
     column_config={"Map": st.column_config.LinkColumn("Google Maps")},
 )
@@ -142,5 +148,5 @@ with col1:
 
 st.caption(
     "Data source: Google Sheet → tab 'Form responses 1'. "
-    "Edit the sheet and click Reload (or wait ~60s cache)."
+    "Add or edit rows in the sheet, then click Reload (or wait ~60s cache)."
 )
