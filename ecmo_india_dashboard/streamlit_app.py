@@ -1,4 +1,4 @@
-# streamlit_app.py — ECMO India Live Dashboard (Sheets + charts)
+# streamlit_app.py — ECMO India Live Dashboard (Sheets + charts, tolerant headers)
 
 from urllib.parse import quote_plus
 import pandas as pd
@@ -21,9 +21,25 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+def _dedupe_headers(headers: list[str]) -> list[str]:
+    """If headers contain duplicates, append ' (2)', ' (3)', ... to later ones."""
+    seen = {}
+    result = []
+    for h in headers:
+        key = (h or "").strip()
+        if key == "":
+            key = "Unnamed"
+        if key not in seen:
+            seen[key] = 1
+            result.append(key)
+        else:
+            seen[key] += 1
+            result.append(f"{key} ({seen[key]})")
+    return result
+
 @st.cache_data(ttl=60)
 def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
-    """Load a worksheet into a DataFrame, handling duplicate headers safely."""
+    """Load a worksheet into a DataFrame, allowing duplicate headers safely."""
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPE
     )
@@ -40,12 +56,17 @@ def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
             f"Available tabs: {[w.title for w in sh.worksheets()]}"
         )
 
-    # Use the header row as-is (even if duplicates) to avoid gspread duplicate check
-    headers = ws.row_values(1) or []
-    records = ws.get_all_records(expected_headers=headers)
-    df = pd.DataFrame(records)
+    # Pull raw grid values; FIRST ROW = headers (may contain duplicates)
+    values = ws.get_all_values() or []
+    if not values:
+        return pd.DataFrame()
 
-    # Normalize header whitespace
+    raw_headers = [h.strip() for h in values[0]]
+    headers = _dedupe_headers(raw_headers)   # make them unique
+    rows = values[1:]
+    df = pd.DataFrame(rows, columns=headers)
+
+    # strip surrounding whitespace in all column names
     df.columns = [c.strip() for c in df.columns]
     return df
 
@@ -57,7 +78,6 @@ def build_maps_link(hospital: str, city: str, state: str) -> str:
     return f"https://www.google.com/maps/search/?api=1&query={quote_plus(' '.join(parts))}"
 
 def first_nonempty(a, b):
-    """Return a if it's nonempty, else b."""
     a_str = str(a).strip()
     b_str = str(b).strip()
     return a if a_str else (b if b_str else "")
@@ -76,10 +96,10 @@ except Exception as e:
     )
     st.stop()
 
-# Harmonize expected column names (keep this list lenient to minor variations)
-def pick(df_cols, *candidates):
+# Map flexible column names
+def pick(cols, *candidates):
     for c in candidates:
-        if c in df_cols:
+        if c in cols:
             return c
     return None
 
@@ -91,48 +111,35 @@ col_ecmo   = pick(df.columns, "ECMO Type", "ECMO_Type")
 col_diag   = pick(df.columns, "Provisional Diagnosis", "Provisional diagnos", "Provisional Diagnos")
 col_age    = pick(df.columns, "Age of the patient", "Age")
 col_senior = pick(df.columns, "Name of Senior intensivist supervising the procedure")
-col_misc1  = pick(df.columns, "Miscellaneous comments")
+# handle duplicates coming from dedup (e.g., "Miscellaneous comments", "Miscellaneous comments (2)")
+col_misc1  = pick(df.columns, "Miscellaneous comments", "Miscellaneous comments (1)")
 col_misc2  = pick(df.columns, "Miscellaneous comments (2)")
 
-# Combine duplicate Misc columns into one (prefer non-empty)
+# Combine Misc columns into one (prefer non-empty)
+col_misc = None
 if col_misc1 and col_misc2:
     df["Miscellaneous comments"] = df.apply(lambda r: first_nonempty(r[col_misc1], r[col_misc2]), axis=1)
-    # drop the (2) column
-    df.drop(columns=[col_misc2], inplace=True, errors="ignore")
     col_misc = "Miscellaneous comments"
 elif col_misc1:
     col_misc = col_misc1
 elif col_misc2:
     df.rename(columns={col_misc2: "Miscellaneous comments"}, inplace=True)
     col_misc = "Miscellaneous comments"
-else:
-    col_misc = None
 
-# Build a single Google Maps link column and keep only that one
+# Single Google Maps link
 if col_hosp or col_city or col_state:
     df["Google Maps"] = df.apply(
-        lambda r: build_maps_link(
-            r.get(col_hosp, ""), r.get(col_city, ""), r.get(col_state, "")
-        ),
+        lambda r: build_maps_link(r.get(col_hosp, ""), r.get(col_city, ""), r.get(col_state, "")),
         axis=1,
     )
 
-# Add a 1-based serial number
+# Add 1-based serial number
 df.insert(0, "S.No", range(1, len(df) + 1))
 
-# Choose table columns to show (omit email and initiation date on purpose)
+# Choose table columns (no email / initiation date)
 table_cols = [
-    "S.No",
-    col_time,
-    col_hosp,
-    col_city,
-    col_state,
-    col_ecmo,
-    col_diag,
-    col_age,
-    col_senior,
-    col_misc,
-    "Google Maps",
+    "S.No", col_time, col_hosp, col_city, col_state, col_ecmo, col_diag,
+    col_age, col_senior, col_misc, "Google Maps"
 ]
 table_cols = [c for c in table_cols if c in df.columns or c == "S.No"]
 
@@ -140,9 +147,7 @@ table_cols = [c for c in table_cols if c in df.columns or c == "S.No"]
 st.dataframe(
     df[table_cols],
     use_container_width=True,
-    column_config={
-        "Google Maps": st.column_config.LinkColumn("Google Maps"),
-    },
+    column_config={"Google Maps": st.column_config.LinkColumn("Google Maps")},
 )
 
 # Reload button
@@ -151,23 +156,19 @@ with left:
     if st.button("🔄 Reload data"):
         st.cache_data.clear()
 
-# ---------------- Charts (beneath the table) ----------------
+# ---------------- Charts ----------------
 st.markdown("---")
 st.subheader("📊 Quick Visuals")
 
-# Pie: ECMO Type distribution
+# Pie: ECMO Type
 if col_ecmo and df[col_ecmo].notna().any():
     pie_df = (
         df[[col_ecmo]]
         .assign(**{col_ecmo: df[col_ecmo].fillna("Unknown").astype(str).str.strip()})
-        .groupby(col_ecmo, dropna=False)
-        .size()
-        .reset_index(name="count")
+        .groupby(col_ecmo, dropna=False).size().reset_index(name="count")
         .sort_values("count", ascending=False)
     )
-    fig_pie = px.pie(
-        pie_df, names=col_ecmo, values="count", title="ECMO Type distribution", hole=0.3
-    )
+    fig_pie = px.pie(pie_df, names=col_ecmo, values="count", title="ECMO Type distribution", hole=0.3)
     st.plotly_chart(fig_pie, use_container_width=True)
 else:
     st.info("No ECMO Type data to chart yet.")
@@ -177,14 +178,10 @@ if col_state and df[col_state].notna().any():
     bar_df = (
         df[[col_state]]
         .assign(**{col_state: df[col_state].fillna("Unknown").astype(str).str.strip()})
-        .groupby(col_state, dropna=False)
-        .size()
-        .reset_index(name="count")
+        .groupby(col_state, dropna=False).size().reset_index(name="count")
         .sort_values("count", ascending=False)
     )
-    fig_bar = px.bar(
-        bar_df, x="count", y=col_state, orientation="h", title="State-wise ECMO cases"
-    )
+    fig_bar = px.bar(bar_df, x="count", y=col_state, orientation="h", title="State-wise ECMO cases")
     fig_bar.update_layout(yaxis={"categoryorder": "total ascending"})
     st.plotly_chart(fig_bar, use_container_width=True)
 else:
