@@ -1,4 +1,4 @@
-# streamlit_app.py — ECMO India Live Dashboard (show ALL columns)
+# streamlit_app.py — ECMO India Live Dashboard (show ALL columns; one Google Maps column)
 
 from urllib.parse import quote_plus
 import pandas as pd
@@ -11,9 +11,8 @@ st.set_page_config(page_title="ECMO India – Live Dashboard", layout="wide")
 st.title("🫀 ECMO India – Live Dashboard")
 
 # ---------------- Your Google Sheet ----------------
-# Put your spreadsheet ID and tab name here
-SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"
-WORKSHEET_NAME = "Form responses 1"   # or "Dashboard_View" if you made one
+SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # <-- keep or change
+WORKSHEET_NAME = "Form responses 1"                         # <-- change if you use a view tab
 
 # ---------------- Auth / loader ----------------
 SCOPE = [
@@ -23,7 +22,7 @@ SCOPE = [
 
 @st.cache_data(ttl=60)
 def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
-    """Read the sheet and tolerate duplicate/blank headers."""
+    """Read the worksheet and tolerate duplicate/blank headers."""
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPE
     )
@@ -71,7 +70,6 @@ def build_maps_link(hospital: str, city: str, state: str) -> str:
 def find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     cols_lc = {c.lower(): c for c in df.columns}
     for cand in candidates:
-        # exact or "contains" match
         for lc, orig in cols_lc.items():
             if lc == cand or cand in lc:
                 return orig
@@ -106,15 +104,16 @@ if "Google_Maps_Link" not in df.columns and all([hosp_col, city_col, state_col])
         axis=1
     )
 
-# Show a nicer label for the link at the end
+# Keep only the single rightmost clickable column: "Google Maps"
 if "Google_Maps_Link" in df.columns:
-    df["Google Maps"] = df["Google_Maps_Link"]
+    df["Google Maps"] = df["Google_Maps_Link"]    # clickable label
+    df = df.drop(columns=["Google_Maps_Link"])    # drop the raw left column
 
 # Add S.No starting at 1
 df = df.reset_index(drop=True)
 df.insert(0, "S.No", range(1, len(df) + 1))
 
-# Put Google Maps as the last column if present
+# Put Google Maps as the last column (if present)
 if "Google Maps" in df.columns:
     display_cols = [c for c in df.columns if c != "Google Maps"] + ["Google Maps"]
 else:
