@@ -1,30 +1,34 @@
 # streamlit_app.py — ECMO India Live Dashboard
-# Keep this file and ecmo_cases.csv in the SAME folder: ecmo_india_dashboard/
+# Updated to load directly from Google Sheets via service account
 
 from pathlib import Path
 from urllib.parse import quote_plus
 import pandas as pd
 import streamlit as st
-import os
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ---------- Page setup ----------
 st.set_page_config(page_title="ECMO India – Live Dashboard", layout="wide")
 
-# If you publish a Google Sheet "to the web" as CSV, put its URL in GSHEET_URL (optional)
-GSHEET_URL = os.environ.get("GSHEET_URL", "").strip()
+# ---------- Google Sheets connector ----------
+SCOPE = ["https://www.googleapis.com/auth/spreadsheets",
+         "https://www.googleapis.com/auth/drive"]
 
-# ---------- Data loader ----------
 @st.cache_data(ttl=60)
 def load_data() -> pd.DataFrame:
-    if GSHEET_URL:
-        # Load directly from a published-to-web Google Sheet CSV URL
-        return pd.read_csv(GSHEET_URL)
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"], scopes=SCOPE
+    )
+    gc = gspread.authorize(creds)
 
-    # Always read the CSV that lives next to this script
-    csv_path = Path(__file__).parent / "ecmo_cases.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(f"CSV not found at: {csv_path}")
-    return pd.read_csv(csv_path)
+    # Open by sheet ID (recommended: safer than name)
+    # Replace with your actual sheet ID from the URL:
+    # https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit
+    sh = gc.open_by_key("YOUR_SHEET_ID_HERE")
+    ws = sh.sheet1  # or use worksheet("Form Responses 1")
+    data = ws.get_all_records()
+    return pd.DataFrame(data)
 
 # ---------- Safe Google Maps link builder ----------
 def build_maps_link(hospital: str, city: str, state: str) -> str:
@@ -38,8 +42,8 @@ try:
     df = load_data()
 except Exception as e:
     st.error(
-        "Could not load data. Ensure **ecmo_cases.csv** is inside the "
-        "**ecmo_india_dashboard/** folder (same folder as this app).\n\n"
+        "❌ Could not load data from Google Sheets. "
+        "Make sure the service account has Editor access to your sheet.\n\n"
         f"Error: {e}"
     )
     st.stop()
@@ -95,6 +99,6 @@ with col1:
         st.cache_data.clear()
 
 st.caption(
-    "Tip: Keep **ecmo_cases.csv** in the **ecmo_india_dashboard/** folder. "
-    "If you add **Age** or **Google_Maps_Link**, they’ll show automatically."
+    "This dashboard now updates directly from the Google Sheet. "
+    "Remove or edit rows in the sheet → changes reflect here after reload."
 )
