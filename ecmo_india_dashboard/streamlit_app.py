@@ -11,8 +11,8 @@ st.set_page_config(page_title="ECMO India – Live Dashboard", layout="wide")
 st.title("🫀 ECMO India – Live Dashboard")
 
 # ---------------- Your Google Sheet (hard-coded) ----------------
-SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # <- from your URL
-WORKSHEET_NAME = "Form_Responses"                           # <- purple tab name in your screenshot
+SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # from your URL
+WORKSHEET_NAME = "Form responses 1"                          # exact tab name (case/space sensitive)
 
 # ---------------- Auth / loader ----------------
 SCOPE = [
@@ -22,7 +22,7 @@ SCOPE = [
 
 @st.cache_data(ttl=60)
 def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
-    # authenticate using secrets you saved under [gcp_service_account]
+    # authenticate using secrets saved under [gcp_service_account]
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPE
     )
@@ -31,14 +31,20 @@ def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
     # open spreadsheet (404 here => wrong ID or not shared with service account)
     sh = gc.open_by_key(sheet_id)
 
-    # open worksheet by name; show helpful error if wrong
+    # open worksheet by name; fallback to first sheet with helpful message
     try:
         ws = sh.worksheet(ws_name)
     except gspread.exceptions.WorksheetNotFound:
         tabs = [(w.title, getattr(w, "id", None)) for w in sh.worksheets()]
-        raise RuntimeError(
-            f"Worksheet '{ws_name}' not found. Available tabs: {tabs}"
-        )
+        if tabs:
+            # fallback to first tab so the app still renders
+            ws = sh.sheet1
+            st.warning(
+                f"Worksheet '{ws_name}' not found — using first tab: '{ws.title}'. "
+                f"Available tabs: {tabs}"
+            )
+        else:
+            raise RuntimeError("This spreadsheet has no worksheets.")
 
     records = ws.get_all_records()
     return pd.DataFrame(records)
@@ -107,12 +113,12 @@ if "Google_Maps_Link" in df.columns and "Hospital" in df.columns:
 
 # Columns to show (fall back to all if missing)
 cols_pref = [
-    "Initiation date",          # your sheet header appears like this in the screenshot
+    "Initiation date",          # as seen in your sheet
     "Hospital",
     "Location_City",
     "Location_State",
     "ECMO_Type",
-    "Provisional Diagnos",      # adjust if your exact header differs
+    "Provisional Diagnos",      # keep your exact header spelling
 ]
 cols = [c for c in cols_pref if c in df.columns]
 if "Age of the patient" in df.columns:
@@ -135,6 +141,6 @@ with col1:
         st.cache_data.clear()
 
 st.caption(
-    "Data source: Google Sheet → tab 'Form_Responses'. "
+    "Data source: Google Sheet → tab 'Form responses 1'. "
     "Edit the sheet and click Reload (or wait ~60s cache)."
 )
