@@ -1,4 +1,4 @@
-# streamlit_app.py — ECMO India Live Dashboard (robust + diagnostics)
+# streamlit_app.py — ECMO India Live Dashboard (robust + diagnostics + S.No + Misc)
 
 from urllib.parse import quote_plus
 import pandas as pd
@@ -72,7 +72,7 @@ with st.sidebar:
         st.cache_data.clear()
         st.success("Cache cleared")
 
-# ---------------- Load & show diagnostics ----------------
+# ---------------- Load & diagnostics ----------------
 try:
     df = load_data_from_sheet(SHEET_ID, WORKSHEET_NAME)
 except Exception as e:
@@ -86,11 +86,10 @@ except Exception as e:
     )
     st.stop()
 
-# Quick diagnostics so we always see *something*
 st.caption(f"Loaded **{df.shape[0]} rows** × **{df.shape[1]} cols**")
 st.caption(f"Columns: {list(df.columns)}")
 
-# ---------------- Transform / display (fully guarded) ----------------
+# ---------------- Transform / display ----------------
 try:
     # Clean headers
     df.columns = [c.strip() for c in df.columns]
@@ -119,8 +118,13 @@ try:
     if "Google_Maps_Link" in df.columns:
         df["Map"] = df["Google_Maps_Link"]
 
+    # Add 1-based serial numbers as the first column
+    if not df.empty:
+        df = df.reset_index(drop=True)
+        df.insert(0, "S.No", range(1, len(df) + 1))
+
     # Display order (includes Misc)
-    display_cols = []
+    display_cols = ["S.No"] if "S.No" in df.columns else []
     for c in [col_time, col_init, col_hosp, col_city, col_state, col_ecmo, col_diag, col_age, col_misc, "Map"]:
         if c and (c in df.columns or c == "Map"):
             display_cols.append(c)
@@ -130,7 +134,10 @@ try:
     st.dataframe(
         df[display_cols],
         use_container_width=True,
-        column_config={"Map": st.column_config.LinkColumn("Google Maps")},
+        column_config={
+            "S.No": st.column_config.NumberColumn("S.No"),
+            "Map": st.column_config.LinkColumn("Google Maps"),
+        },
     )
 
     # Reload button
@@ -145,7 +152,6 @@ try:
     )
 
 except Exception as e:
-    # If *anything* in transform/display fails, show the exception instead of a blank screen
     st.error("⚠️ Rendering error — see details below.")
     st.exception(e)
-    st.dataframe(df, use_container_width=True)  # show raw DF to help debug
+    st.dataframe(df, use_container_width=True)
