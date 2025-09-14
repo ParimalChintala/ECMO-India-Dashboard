@@ -14,7 +14,7 @@ st.title("🫀 ECMO India – Live Dashboard")
 
 # ---------------- Your Google Sheet ----------------
 SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # spreadsheet id
-WORKSHEET_NAME = "Form responses 15"                         # exact tab name you're using now
+WORKSHEET_NAME = "Form responses 15"                        # exact tab name you're using now
 
 # ---------------- Auth / loader ----------------
 SCOPE = [
@@ -129,6 +129,9 @@ except Exception as e:
     )
     st.stop()
 
+# Keep a snapshot of the original columns (from the sheet) so we can show ALL of them
+orig_cols = list(df.columns)
+
 # ---- Flexible column mapping (extended for your new form) ----
 # Timestamp: prefer 'Timestamp'; else combine 'ECMO initiation date' + 'ECMO initiation time'
 col_time = pick(df.columns, "Timestamp")
@@ -162,15 +165,15 @@ col_misc1  = pick(df.columns, "Miscellaneous comments", "Miscellaneous comments 
 col_misc2  = pick(df.columns, "Miscellaneous comments (2)")
 
 # Combine Misc columns into one (prefer non-empty)
-col_misc = None
+combined_misc_col = None
 if col_misc1 and col_misc2:
     df["Miscellaneous comments"] = df.apply(lambda r: first_nonempty(r[col_misc1], r[col_misc2]), axis=1)
-    col_misc = "Miscellaneous comments"
+    combined_misc_col = "Miscellaneous comments"
 elif col_misc1:
-    col_misc = col_misc1
+    combined_misc_col = col_misc1
 elif col_misc2:
     df.rename(columns={col_misc2: "Miscellaneous comments"}, inplace=True)
-    col_misc = "Miscellaneous comments"
+    combined_misc_col = "Miscellaneous comments"
 
 # Single Google Maps link (use hospital + city + state)
 if col_hosp or col_city or col_state:
@@ -182,16 +185,27 @@ if col_hosp or col_city or col_state:
 # Add 1-based serial number
 df.insert(0, "S.No", range(1, len(df) + 1))
 
-# Choose table columns (no email / old initiation date columns)
-table_cols = [
-    "S.No", col_time, col_hosp, col_city, col_state, col_ecmo, col_diag,
-    col_age, col_senior, col_misc, "Google Maps"
-]
-table_cols = [c for c in table_cols if c in df.columns or c == "S.No"]
+# ---------------- Show ALL columns ----------------
+# Start with S.No, then every original column from the sheet, preserving their order.
+display_cols = ["S.No"] + orig_cols
 
-# Show table
+# If we created "Initiation DateTime" (no native Timestamp), slot it right after S.No.
+if "Initiation DateTime" in df.columns and "Initiation DateTime" not in display_cols:
+    display_cols.insert(1, "Initiation DateTime")
+
+# If we created a combined Misc column and it's not already present, append it.
+if combined_misc_col and combined_misc_col not in display_cols:
+    display_cols.append(combined_misc_col)
+
+# Ensure Google Maps is shown at the end.
+if "Google Maps" in df.columns and "Google Maps" not in display_cols:
+    display_cols.append("Google Maps")
+
+# Only include columns that exist (guard against rare mismatches)
+display_cols = [c for c in display_cols if c in df.columns]
+
 st.dataframe(
-    df[table_cols],
+    df[display_cols],
     use_container_width=True,
     column_config={"Google Maps": st.column_config.LinkColumn("Google Maps")},
 )
@@ -232,3 +246,4 @@ if col_state and df[col_state].notna().any():
     st.plotly_chart(fig_bar, use_container_width=True)
 else:
     st.info("No Location State data to chart yet.")
+
