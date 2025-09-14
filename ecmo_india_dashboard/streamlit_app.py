@@ -1,4 +1,4 @@
-# streamlit_app.py — ECMO India Live Dashboard (Google Sheets only)
+# streamlit_app.py — ECMO India Live Dashboard (Google Sheets only, robust headers)
 
 from urllib.parse import quote_plus
 import pandas as pd
@@ -10,9 +10,9 @@ from google.oauth2.service_account import Credentials
 st.set_page_config(page_title="ECMO India – Live Dashboard", layout="wide")
 st.title("🫀 ECMO India – Live Dashboard")
 
-# ---------------- Your Google Sheet (hard-coded) ----------------
+# ---------------- Your Google Sheet ----------------
 SHEET_ID = "19MGz1nP5k0B-by9dLE9LgA3BTuQ4FYn1cEAGklvZprE"   # from your URL
-WORKSHEET_NAME = "Form responses 1"                          # bottom tab name (case/space sensitive)
+WORKSHEET_NAME = "Form responses 1"                          # bottom tab name
 
 # ---------------- Auth / loader ----------------
 SCOPE = [
@@ -22,16 +22,12 @@ SCOPE = [
 
 @st.cache_data(ttl=60)
 def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
-    # authenticate using secrets saved under [gcp_service_account]
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPE
     )
     gc = gspread.authorize(creds)
-
-    # open spreadsheet (404 here => wrong ID or not shared with service account)
     sh = gc.open_by_key(sheet_id)
 
-    # try exact worksheet name, else fall back to first tab with a warning
     try:
         ws = sh.worksheet(ws_name)
     except gspread.exceptions.WorksheetNotFound:
@@ -45,10 +41,7 @@ def load_data_from_sheet(sheet_id: str, ws_name: str) -> pd.DataFrame:
         else:
             raise RuntimeError("This spreadsheet has no worksheets.")
 
-    # pull records (rows below the header)
     records = ws.get_all_records()
-
-    # if no rows yet, build an empty DF with the header row so the table still renders
     if not records:
         headers = ws.row_values(1) or []
         return pd.DataFrame(columns=[h.strip() for h in headers])
@@ -60,16 +53,12 @@ def build_maps_link(hospital: str, city: str, state: str) -> str:
     parts = [str(x).strip() for x in [hospital, city, state] if str(x).strip()]
     return f"https://www.google.com/maps/search/?api=1&query={quote_plus(' '.join(parts))}"
 
-# ---------------- Debug sidebar ----------------
-with st.sidebar:
-    st.header("Debug")
-    sa_email = st.secrets["gcp_service_account"].get("client_email", "n/a")
-    st.write("Service account:", sa_email)
-    st.write("Sheet ID:", SHEET_ID)
-    st.write("Worksheet:", WORKSHEET_NAME)
-    if st.button("Clear cache"):
-        st.cache_data.clear()
-        st.success("Cache cleared")
+def pick(df: pd.DataFrame, *names):
+    """Return the first column name that exists in df (case-sensitive)."""
+    for n in names:
+        if n in df.columns:
+            return n
+    return None
 
 # ---------------- Load data ----------------
 try:
@@ -79,8 +68,8 @@ except Exception as e:
         "❌ Could not load data from Google Sheets.\n\n"
         f"Details: {e}\n\n"
         "Checklist:\n"
-        "• This sheet is shared with the service account as **Editor**\n"
-        "• SHEET_ID matches the part between /d/ and /edit in the URL\n"
+        "• Sheet is shared with the service account (Editor)\n"
+        "• SHEET_ID matches the part between /d/ and /edit\n"
         "• WORKSHEET_NAME matches the bottom tab name exactly"
     )
     st.stop()
@@ -89,53 +78,41 @@ except Exception as e:
 # Clean headers
 df.columns = [c.strip() for c in df.columns]
 
+# Resolve column names regardless of spelling/underscores
+col_time   = pick(df, "Timestamp")
+col_init   = pick(df, "Initiation date", "Initation date")
+col_hosp   = pick(df, "Hospital")
+col_city   = pick(df, "Location City", "Location_City", "City")
+col_state  = pick(df, "Location State", "Location_State", "State")
+col_ecmo   = pick(df, "ECMO Type", "ECMO_Type")
+col_diag   = pick(df, "Provisional Diagnosis", "Provisional Diagnos")
+col_age    = pick(df, "Age of the patient", "Age")
+
 # Build Google_Maps_Link if missing and enough info is present
-if "Google_Maps_Link" not in df.columns:
-    hosp_col  = next((c for c in df.columns if c.lower() == "hospital"), None)
-    city_col  = next((c for c in df.columns if c.lower() in ("location city", "location_city", "city")), None)
-    state_col = next((c for c in df.columns if c.lower() in ("location state", "location_state", "state")), None)
-    if hosp_col and city_col and state_col and not df.empty:
-        df["Google_Maps_Link"] = df.apply(
-            lambda r: build_maps_link(
-                r.get(hosp_col, ""), r.get(city_col, ""), r.get(state_col, "")
-            ),
-            axis=1,
-        )
-
-# Optional Map link column
-if "Google_Maps_Link" in df.columns:
-    df["Map"] = df["Google_Maps_Link"]
-
-# Make Hospital clickable when link available
-if "Google_Maps_Link" in df.columns and "Hospital" in df.columns and not df.empty:
-    df["Hospital"] = df.apply(
-        lambda r: (
-            f"[{r['Hospital']}]({r['Google_Maps_Link']})"
-            if pd.notna(r.get("Google_Maps_Link", "")) and str(r["Google_Maps_Link"]).strip()
-            else r["Hospital"]
+if "Google_Maps_Link" not in df.columns and all(x for x in [col_hosp, col_city, col_state]) and not df.empty:
+    df["Google_Maps_Link"] = df.apply(
+        lambda r: build_maps_link(
+            r.get(col_hosp, ""), r.get(col_city, ""), r.get(col_state, "")
         ),
         axis=1,
     )
 
-# Columns to show (fall back to all if missing)
-cols_pref = [
-    "Initiation date",
-    "Hospital",
-    "Location City",
-    "Location State",
-    "ECMO Type",
-    "Provisional Diagnos",
-]
-cols = [c for c in cols_pref if c in df.columns]
-if "Age of the patient" in df.columns:
-    cols.append("Age of the patient")
-if "Map" in df.columns:
-    cols.append("Map")
-if not cols:
-    cols = list(df.columns)
+# Add a dedicated Map link column (keeps Hospital as plain text)
+if "Google_Maps_Link" in df.columns:
+    df["Map"] = df["Google_Maps_Link"]
+
+# Construct the display table with whatever exists
+display_cols = []
+for c in [col_time, col_init, col_hosp, col_city, col_state, col_ecmo, col_diag, col_age, "Map"]:
+    if c and (c in df.columns or c == "Map"):
+        display_cols.append(c)
+
+# If nothing matched, show everything
+if not display_cols:
+    display_cols = list(df.columns)
 
 st.dataframe(
-    df[cols] if not df.empty else df,  # show headers even if empty
+    df[display_cols],
     use_container_width=True,
     column_config={"Map": st.column_config.LinkColumn("Google Maps")},
 )
@@ -148,5 +125,5 @@ with col1:
 
 st.caption(
     "Data source: Google Sheet → tab 'Form responses 1'. "
-    "Add or edit rows in the sheet, then click Reload (or wait ~60s cache)."
+    "Edit the sheet and click Reload (or wait ~60s cache)."
 )
